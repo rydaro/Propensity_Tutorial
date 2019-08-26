@@ -1,0 +1,1477 @@
+---
+title: Applications of Propensity Score Methods for Several Outcomes of Interest Using
+  Claims Data
+output:
+  word_document:
+    toc: yes
+  pdf_document: default
+  html_document:
+    fig_width: 8
+    toc: yes
+header-includes:
+- \usepackage{setspace}
+- \usepackage{graphicx}
+- \doublespacing
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+library(tidyverse)
+library(tableone)
+library(MatchIt)
+library(ggplot2)
+library(pander)
+library(stats)
+library(optmatch)
+library(splines)
+library(mgcv)
+library(itsadug)
+library(RColorBrewer)
+library(CBPS)
+library(ggpubr)
+
+```
+
+
+
+
+##Abstract
+
+Medical insurance claims are becoming an increasingly common data sources to answer a variety of questions in biomedical research. While comprehensive in terms of longitudinal characterization of disease on potentially large number of patients, these datasets need to be repurposed for conducting research, as they are not originally designed for population-based research.  Along with complex selection bias and missing data issues, these studies are purely observational, which limits effective understanding of therapeutic or non-therapeutic interventions and characterization of the treatment differences between groups being compared. Several methods have been developed to better estimate causal treatment effects, often utilizing the propensity score. This paper offers some practical guidance to researchers in using propensity methods for estimating causal treatment effects on several types of outcomes common to medical studies, such as binary, count, time to event and time varying outcomes. We provide a R-Markdown version of the paper with readily implementable code so that the paper can serve as a guided tutorial for practitioners. The methods are illustrated using a cohort of patients with prostate cancer from the Clinformatics TM Data Mart Database (OptumInsight, Eden Prairie, Minnesota).
+
+
+##Introduction
+
+Health service billing data can be used to answer clinical and epidemiological questions using a large number of patients and has the potential to capture patterns in health care practice that takes place in the real world. Large datasets allow investigations to conduct scientific queries which may often be difficult to answer via a randomized clinical trial. For example, comparing multiple treatments that are produced by different drug companies and with varying guidelines for their use for a disease may only be feasible in a real healthcare database. While large data sources offer a wealth of information, there are many challenges and drawbacks, especially when estimating a causal treatment effect. When estimating a causal treatment effect on an outcome, randomized control trials are the gold standard. Randomization ensures that the treatment and control groups are similar and considered “exchangeable.” With claims data, the assignment of treatment is not random, and thus susceptible to confounding and selection bias. Many have proposed general guidelines for using claims data for comparative effectiveness research (Johnson et. Al 2009, Berger et Al 2017, Birnbaum et Al, 1999), citing propensity score methods as a valid analytical approach.  While there are several approaches to handling confounding and bias available, propensity score methods are versatile in that they can be used for a variety of research questions and can be used for many different kinds of data sources. Thus, these methods have exploded in popularity for pharmacoepidemiologic and pharmacoeconomic research. 
+
+Ali et al (2015) found 96 published medical papers in a 6-month period that reported use of a propensity score method. However, in their systemic review, they found that many papers reporting use of propensity scores did not adequately evaluate covariate balance or did not adequately describe use of the propensity method in the outcome analysis. Others have also noted common misuse of propensity methods (Austin, 2008; Weitzen, 2004; D’ascenzo, 2012; Saswata, 2016). Xiaoxin et Al (2017) found in a more recent systemic review of cancer studies that there is still considerable room for improvement in reporting propensity analysis and offered guidelines for reporting. Yet, some researchers are still not clear with their use of propensity methods. For example, when comparing radical prostatectomy versus radiotherapy, Koo et Al (2017) mentioned use of propensity matching but did not provide adequate detail. Variables used in propensity model were described, but there were no further details on the matching method used or covariate balance assessment. Thus, there is still misuse of propensity methodology and a need for more practical guidance. 
+
+Austin (2011) does provide a conceptual overview of propensity score methods from a foundational and introductory standpoint. Stuart (2013) again provides a general framework for using propensity methods with observational health care data, providing an example of effect estimation of drug monitoring programs for individuals with serious mental illness. While necessary and useful, these guides do not offer the reader full practical guidance, as there remains a gap from methodological understanding to actual implementation. Further, these tutorials do not address use propensity methods for more complicated outcomes common to medical research, such as non-continuous or correlated outcomes.
+
+Therefore, there is need for a usable, comprehensive tutorial for characterizing a binary treatment effect on various outcome types. This paper outlines the use of two primary propensity score methods: Propensity Matching (PM) and Inverse Probability of Treatment Weighting (IPTW). The paper also details how to use each method to estimate average treatment effect for four common outcome types: 1) Binary, 2) Count, 3) Time to event, and 4) Time varying. For each stage of the analysis, detailed R code is provided in an online R Markdown file.
+
+
+##Background
+Causal inference relies on the potential-outcomes framework, where each individual has a potential outcome under each possible treatment. Typically, this framework applies to two possible available treatments, such as an active treatment and a control. As described by Rubin, all causal inference problems are a comparison of potential outcomes on the same $i^{th}$ individual. Define $Y_{i}(0)$ as the observed outcome under the control treatment, and $Y_{i}(1)$ as the observed outcome under the active treatment of interest. We wish to know the treatment effect for each individual defined as $Y_{i}(1) - Y_{i}(0)$, which cannot be estimated directly from the observed data because for each individual we observe either $Y_{i}(0)$ or $Y_{i}(1)$ but never both. If subject $i$ actually received the active treatment, denoted by $T_i=1$ then $Y_{i}(1)$ is observed and $Y_i =Y_{i}(1)$; otherwise, $T_i=0$, and we observe $Y_i=Y_{i}(0)$. Often, researchers are interested in how an active treatment compares to a control within a larger population. We can define the average treatment effect (ATE) as $E[Y_{i}(1) - Y_{i}(0)]$ (Imbens, 2004), which is the average effect of entire population. In a randomized trial, we can estimate ATE as $E[Y_{i}(1) - Y_{i}(0)] = E[Y_i|T_i=1] - E[Y_i|T_i=0]$ (Lunceford & Davidian, 2004; Austin 2011) as randomization ensures that the treatment groups are balanced and hence $E[Y_i(a)] = E[Y_i(a)|T_i=a] = E[Y_i|T_i=a]$ for all $a = 0,1$  We can also define the average treatment effect of the treated (ATT) as $E[Y_i(1)− Y_i(0)|T = 1]$ and the average treatment effect on the control (ATC) as $E[Y_i(1)− Y_i(0)|T = 0]$ when a particular sub-population is of interest.
+
+A simple approach to look at a difference in an outcome is a general linear model with the treatment variable as the sole predictor
+$$
+g(\mu_{i}) = \beta_{0} +\beta_{1}T_{i}
+$$
+where $\mu_{i} = E[Y_{i}|T_i]$ and $\beta_1 = E[Y_i|T_i=1] - E[Y_i|T_i=0]$. This is the standard method for data from a randomized trial. With observational studies, however, the mechanism behind treatment assignment is not random, and thus the treatment populations may differ greatly. Therefore $E[Y(1)|T = 1] \neq E [Y(1)]$ and $E[Y(0)|T = 0] \neq E [Y(0)]$ in general (Austin 2011). As a result, the estimate for ATE will be biased due to confounding. Traditionally, confounders were adjusted for directly in the outcome to obtain an estimate of ATE. However useful, this approach can break down where there are many covariates, the groups of comparison greatly imbalanced on one or several confounders, or the confounders are highly correlated. With the large number of variables seen in health databases, this approach is often not feasible. The advent of the propensity score offers alternative analytical approaches that are more suitable for this type of data.
+
+### Variable Indentification and the Propensity Score 
+Proposed by Rosenbaum and Rubin (1983a), the propensity score is $e_{i}= Pr(T_{i} = 1| X_{i} =x)$ . The score can be interpreted as the probability a subject receives treatment  conditional on the covariates $X_{i}$. 
+$0 <P(T_{i}=1|X_{i})<1$ and $(Y_i(0),Y_i(1)) \perp \!\!\!\! \perp T_i|X_i$
+
+$\rotatebox[origin=c]{90}{$\models$}$
+
+$\protect\mathpalette{\protect\independenT}{\perp}}\def\independenT#1#2{\mathrel{\rlap{$#1#2$}\mkern2mu{#1#2}}$
+
+This score helps acheive covariate balance between treatment and control groups. We can estimate this probability using logistic regression, predicting treatment received from our observed covariates, expressed as 
+$$log\frac{e_{i}}{(1-e_{i})} = X_{i}^T\gamma$$ 
+and thus 
+$$e_{i} = \dfrac{1}{1+e^{-(X_{i}^T\gamma)}}$$
+
+While logistic regression is commonly used to estimate this propensity, researchers are not restricted to parametric models. Many have looked machine learning estimators, such as boosted logistic regression and random forests (Lee et Al. 2010), and neural networks (Setoguchi et Al 2008, Westreich 2010). Imai and Ratkovic (2014) propose CBPS as a generalized method of moments estimate that operationalizes on the dual characteristics of the propensity score, shown to perform well in pharmacoepidemiology (Wyss et al. 2014). We do note that the ultimate goal of the propensity model is not to predict treatment assignment necessarily, but to reduce bias among covariates (Rubin & Thomas, 1996). Still, the treatment effect estimation methods are sensitive to misspecification of the propensity score, and thus the variables used in estimation can matter greatly. Some suggest including all variables associated with the outcome, while excluding those only associated with the treatment of interest (Rubin, 1997; Perkins, 2000; Brookhart, 2006). Such variables may be difficult to identify in large databases, and thus several have proposed automated data-adaptive variable selection tools for the propensity model, such as the high-dimensional propensity score (Schneeweiss et al 2009, Schneeweiss et al 2017). This paper focuses on estimation of the propensity score through logistic regression and CBPS. 
+
+###Propensity Methods
+Once the propensity score is constructed, there are four ways to use the score in treatment effect estimation: 1) Stratification on the propensity score, 2) Direct covariate adjustment of the propensity score in the outcome model, 3) Matching on the propensity score (PM), and 4) Inverse probability treatment weighting on the propensity score (IPTW). Stratification ranks subjects by the estimated propensity score and split into mutually exclusive stratum. The treatment effect in each stratum can then be estimated and pooled to obtain an overall treatment effect (Rosenbaum and Rubin, 1984). Direct covariate adjustment uses the propensity score directly in the outcome model as a covariate, often smoothed using a spline function. We will not discuss these two methods at length, as they are used less commonly, and research suggests they may be biased for non-continuous outcomes (Austin et Al 2007, Austin 2009, Austin 2014). The rest of this paper will focus on the more common methods, PM and IPTW.
+
+####Propensity Matching
+The first method discussed is matching observations based on the propensity score to estimate ATT. Often, exactly identical scores do not exist across individuals, and thus matching requires a well-defined definition “closeness” of propensity based on a measure of distance (Rosenbaum, 2002; Rosenbaum & Rubin,1985). Stuart (2010) provides a comprehensive overview of the various matching methods available. In practice, it is common to do 1:1 matching, where every individual in the treatment group is matched to a one number of patients in the control group, based on the predefined measure of closeness. This matching ratio can result in major loss of data, especially if the treatment groups are very different sizes. An alternative is using 1:k matching, where k is a max number of controls. With a defined distance, called a caliper, all potential matches within the distance up to k will be matched. This allows for maximal efficiency of data while still reducing bias since all close matches are kept. There is little guidance on what caliper a researcher should specify, however, Austin (2011) suggests a caliper of 0.2 standard deviations of the logit of the propensity score. 
+
+####Inverse Probability of Treatment Weighting (IPTW)
+The next method is to calculate the inverse probability of treatment (IPTW) proposed by Rosenbaum (1987). We can calculate the IPTW $v_i$ as
+$$
+v_{i} = \dfrac{T_{i}}{\hat{e}_{i}} + \dfrac{(1-T_{i})}{(1-\hat{e}_{i})}
+$$
+where $\hat{e_i}$ is the estimated propensity score. Joffe et. Al (2004) describe how the outcome model can be fit using these weights, which is similar to survey sample weighting. These weights can be very unstable for extreme values of $\hat{e_i}$, so trimming these values away from the extreme is often practiced (Scharfstein et al, 1999, Lee et Al 2011). The construction of weights used here estimates ATE, and different constructions can be used for ATT and other estimates of interest (Li et al 2018).
+
+
+###Balance Assessment
+
+Before analyzing the outcome, it is good practice to check to see if the propensity method used achieved its goal of balancing the covariates. While there are several balance diagnostics (Rosenbaum 1985, Austin 2009, Flury 1986), A common balance diagnostic is the standardized bias (or standardized difference) for 1:1 matching, defined as
+$$
+  \frac{\bar{x}_{t} - \bar{x}_{c}}{s_{p}}
+$$
+This is the difference in mean value of the covariate in the treatment group vs. the control group, adjusting for variability, where $s_{p}$ is the pooled standard deviation defined as $s_{p}=\sqrt{\frac{s_{t}^2 +s_{c}^2}{2}}$. This value is calculated for each covariate, with values closer to zero indicating less bias. The measure can be calculated for both continuous and categorical indicator variables (Austin, 2011). A lack of balance indicates that the propensity model may be incorrect, or that a different method should be used. There is no generally accepted threshold, although some suggest that the standardized difference should not be greater than $|0.1|$ (Normand 2001, Austin 2011). We can generalize this difference for 1:K matching and when using IPTW by using weights when calculating the means and standard deviations (Austin 2008). The weighted mean is defined as $\bar{x}_{w} = \frac{\sum w_{i}x_{i}}{\sum w_i}$ and the weighted standard deviaion is $$
+s_{w} = \sqrt{\dfrac{\sum w_{i}(x_i - \bar{x}_{w})^2}{\frac{\sum w_{i}}{(\sum w_i)^2 - \sum {w_i}^2}}}
+$$ where $w_i$ is the weight for subject $i$. For 1:1 matching, all observations have equal weight. If 1:k matching is used, observations in the control treatment group have $1/k$ weights and treated observations have weights $1$. For IPTW, the calculated weights can be used, so $v_i = w_i$ for each observation. If sufficient balance is not met, the process of propensity score construction and balance assessment is repeated, changing to the propensity model or matching methods used. 
+
+
+###Treatment Effect Estimation and Sensitivity Analysis
+
+Once sufficient balance has been achieved, one can estimate the average treatment effect using a general outcome model
+$$
+g(\mu_{i}) = \beta_{0} +\beta_{1}T_{i}
+$$
+
+This model can be used directly on the matched dataset if 1:1 matching is used. If 1:k matching or IPTW is used, the constructing weights need to be used as well. Weights can be incorporated in the same fashion as weights from a survey design, using robust standard error estimation to account for error in weight estimation (Joffe 2004). One can also test how sensitive the results are to an unobserved confounder. We will not demonstrate such sensitivity analyses, however, Liu et al. (2013) provide an overview of these approaches.
+
+
+
+##Data
+To test these different methods of causal inference using real data, we chose to study treatment patterns and treatment outcomes among patients with advanced prostate cancer. Many patients with advanced prostate cancer will receive a number of different therapies sequentially in the most advanced form of the disease to try to control the disease. Patients may have varying degrees of responsiveness and tolerance to different therapies during the period of treatment. For example, some patients who experience pain from their cancer will have pain relief after starting a treatment and thus require less opiates to manage their cancer. In addition, some patients will have poor tolerance of some therapies any may experience exacerbation or development of comorbid conditions. It is also important to note that a treatment is typically only continued for as long as it is effectively controlling the disease. Thus, the longer a patient is on a treatment, presumably the longer the duration of disease control on that treatment. 
+
+We defined a cohort of men from data in Clinformatics TM Data Mart Database (OptumInsight, Eden Prairie, Minnesota) who received at least one of the six focus treatments known to have a survival benefit in men with advanced prostate cancer (abiraterone, enzalutamide, sipuleucel-t, docetaxel, cabazitaxel, radium-223) from January 2010 through June 2016. The initial cohort included any patient over the age of 18 with a diagnosis of malignant neoplasm of the prostate. We restricted our final cohort to include patients that were continuously enrolled in the plan for the 180 days before the first focus treatment claim and whose first treatment claim was abiraterone, enzalutamide, docetaxel, and sipuleucel-T, the four most commonly used treatments, and categorized patients given abiraterone or enzalutamide as a common oral therapy group.
+
+###Covariates
+
+Age of the patient at the time of receipt of first-line treatment and patient sociodemographic variables were identified through the OptumInsight database. A demographic-based analytical model is used by OptumInsight to derive many of the sociodemographic variables. The major data syndicator used is Knowledge-Based Marketing Solutions (KBM, Richardson, TX.) Race was classified as white, black, Hispanic, or Asian. Geographic region of the patient was determined by their ZIP, which was encrypted so that we were only able to identify a patient’s region.
+Diabetes, hypertension, cardiac arrhythmias, congestive heart failure (CHF), and osteoporosis, were the pre-existing comorbid diseases we included in our analysis. To identify a pre-existing comorbid disease rather than a comorbid condition that may have resulted from the treatment, the presence of a pre-existing comorbid disease was defined as at least two diagnosis codes within the two years before receipt of the first-line drug.  The ICD-9 (2008-2012) and ICD-10 (2013-2016) codes are from Elixhauser Comorbidity Index and Clinical Classification Software. (Eixhayser et al., 1998; Elixhauser et al. 2014). Table 1 shows the descriptive characteristics of each of these variables across the three primary treatment groups.
+
+###Outcomes
+
+We defined the binary outcome to be whether the patient had any emergency room (ER) visit within 60 days of starting treatment. We used the number of ER visits each patient had within 180 days of starting treatment as a count outcome. ER visits were identified using Current Procedural Terminology (CPT) codes. We considered two time to event outcomes: time on treatment was defined as the time from start of first treatment to the last claim of any of the six focus drugs, and time enrolled was defined as the time from start of treatment to the last claim within the Clinformatics TM Data Mart Database for any medical related issue. The total time enrolled could be considered a possibly surrogate for overall survival since we expect most patients have medical needs and thus claims submitted until shortly before death. For the final time varying outcome, we used opioid usage over time. Opioid use over time was calculated using the prescription drug pharmacy claims. Common opioid drug types were identified and were converted into morphine milligram equivalents (MME) according to the Center for Disease Control (CDC, 2018) conversion factors. The total (MME) supply prescribed was calculated in 30-day periods, starting with the 30 days before the first-line of treatment, which was used as a baseline, and continuing at 30-day intervals for the duration of claims data available.  Table 2 shows the descriptive characteristics of each of these outcome variables across the three primary treatment groups.
+
+
+
+##Propensity Analysis
+
+Optimal sequence of therapies is currently unknown. To determine which first-line treatment may lead to better outcomes regardless of which treatments a patient receives subsequently, we classified patients into one of the three categories of treatment that were prescribed first-line: oral therapy (abiraterone or enzalutamide), chemotherapy (docetaxel), or immunotherapy (sipuleucel-T). Since cabazitaxel and radium-223 were used infrequently as first-line treatments (n=110), we did not include patients who received cabazitaxel or radium-223 first-line in our analysis. We chose sipuleucel-T as the reference group for both analyses since it is the only treatment among the four included in the final analysis for which there is a clear treatment recommendation to be used in patients with minimally to asymptomatic metastatic castration-resistant prostate cancer. From Table 1, we can see that some covariates aren’t distributed the same across groups, such as income and provider specialty. 
+
+
+We can load all data into an active r session:
+```{r data, echo=TRUE}
+#patient firsline information and demographic information
+load('./firstline.Rdata')
+#patient opioid filling information
+load('./firstline_opioid.Rdata')
+#change factor labels for better interpretability 
+firstline_opioid$Treatment <-factor(firstline_opioid$Brand,labels = c("Immunotherapy","Chemotherapy","Oral Therapy"))
+
+firstline_single$Treatment <-factor(firstline_single$Brand,labels = c("Immunotherapy","Chemotherapy","Oral Therapy"))
+#alternative dataset for opioids, where 0's are filled in for all patient time points where no opioids were recorded
+load("./firstline_zero.Rdata")
+
+#we can explore and check the datasets
+#check the size
+dim(firstline_single)
+
+#column names and the order
+colnames(firstline_single)
+
+#load package that makes convenient discriptive summary
+library(tableone)
+#descriptive summaries 
+print(CreateTableOne(vars=c("agecat"),strata=c("Treatment"),data=firstline_single,factorVars = c("agecat"),test=FALSE))
+
+```
+
+###Propensity Score Estimation
+We can predict which treatment was given, $T_{i}=0$ if Sipuluecel-T was given and $T_{i}=1$ if abiraterone or enzalutamide was given using logistic regression, and CBPS. The logistic regression model included all variables shown in Table 1 as covariates, and was constructed using the package logistf REFERENCE. both adjusted and unadjusted. Supplementary Table 1 shows the results of the regression analysis. From the adjusted predicted regression results, we can calculate the estimated propensity score for each subject e_i.  as well as the inverse probability weight w_i. Since very small values of w_i can be unstable, we trimmed the extreme values above 0.99 to 0.99 and similarly values below 0.01 to 0.01. The propensity score constructed from the CBPS approach was implemented through the R package CBPS. The weights from this propensity score were used in the outcome models similar to the inverse probability weights.
+
+
+```{r propensity_construction, echo=TRUE, warning=FALSE}
+
+#create subsets for treating oral therapy and docetaxel separately
+oral<-firstline_single[firstline_single$pae<99,]
+oral$treatment<-oral$pae
+
+#restrict to subjects that were enrolled for at least 60 days for our 60 day outcome
+oral60<-oral %>%
+  filter(enrolltime >=60)
+
+
+#calculate propensity score using logistic regression model
+prop_model <-glm(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=oral60,family=binomial(link="logit"))
+
+#save predicted scores to dataset
+oral60$pr_score <-predict(prop_model,type="response")
+#oral60$pr_score <-prop_model$predict
+
+#trim extreme values for stability
+oral60$pr_score_trim <-if_else(oral60$pr_score<.01,.01,oral60$pr_score)
+oral60$pr_score_trim <-if_else(oral60$pr_score>.99,.99,oral60$pr_score_trim)
+
+#save the inverse weights from the propensity score
+oral60$IPTW <-oral60$treatment/oral60$pr_score_trim + (1-oral60$treatment)/(1-oral60$pr_score_trim)
+```
+
+
+```{r ps plot}
+g<- ggplot(oral60,aes(x = pr_score, color=Treatment,fill=Treatment)) +
+  geom_density(alpha=.47) + 
+  xlab("Estimated Probability of Recieving Oral Therapy") +
+  ylab ("Density") +theme_minimal()+ theme(
+                           axis.ticks.y=element_blank(),
+                         panel.grid.minor=element_blank(),
+                         legend.title=element_blank(),
+                         text = element_text(size=16),
+                         axis.title.x =element_text(hjust = 0.2,size=16))
+
+ggpar(g,palette="nejm")
+
+```
+
+```{r cbps, echo=TRUE}
+library(CBPS)
+#calculate weights using CBPS package and function
+cbpsoral <-CBPS(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=oral60,standardize=FALSE,method="exact",ATT=1)
+
+oral60$cbps <-cbpsoral$weights
+```
+
+###Propensity Score Matching
+To create a matched dataset, we used the R package Matchit. The nearest neighor method was used to select matches within a defined caliper distance of $.2$, with a variable matching ratio of $1:K$ within the defined caliper. These matching specifications were chosen to ensure maximal efficiency of the data. If multiple close matches existed for a subject in the control group, those subjects were retained in the matched dataset. The caliper was decided using an interative process, where several calipers were assessed and the one providing the highest quality matched sample was kept. 
+
+```{r matching, echo=TRUE, message=FALSE, warning=FALSE}
+#create matched dataset based on same propensity model
+#here we switched the outcome, as matchit requires the larger group to be the reference if variable ratio is being used
+#We are capturing up to 4 oral therapy matches for every sipuleucel-T subject
+matched <- matchit((1-treatment)~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data =oral60, method = "nearest",caliper=.2,ratio=4)
+
+#looked at characteristics of matched object
+matched_sum<-summary(matched)
+matched_sum$nn
+
+#save matched dataset
+matched_oral <- match.data(matched)
+```
+
+
+###Inverse Probability Treatment Weighting
+Weights were created from both the logistic regression and CBPS estimated propensity scores using the formula described above. Some weights were unstable, so propensity scores greater that 0.99 were trimmed to 0.99, and scores below 0.01 were trimmed to 0.01. Weights were then recalculated from these trimmed values.
+
+
+###Assessment of Covariate Balance
+Each method can be assessed for successful reduction in bias for the analysis sample. Figure 1 shows a plot of the standardize bias of the covariates between the sipuleucel-T group, and oral therapy group for CBPS, IPTW and propensity matching methods.We can see that the inverse weighted data and the matched sample reduced bias for many covariates, even if perfect balance was not achieved. Unsurprisingly, the CBPS weights have very low bias, as the weights are constructed to achieve this goal. The below code constructs Figure 1.
+```{r balance plot, echo=TRUE, message=FALSE, warning=FALSE}
+###################figure
+#for forest plot to check for bias
+#create dummy variables for the many categorical variables
+model_mat <-model.matrix(~treatment +agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro -1,oral)
+
+model_mat <-data.frame(model_mat)
+#model_mat$treatment <-as.factor(model_mat$treatment)
+
+#calculate means and standard deviations of each variable by group
+fullsamp_means <-model_mat %>%
+  group_by(treatment) %>%
+  summarise_all(funs(mean))
+
+fullsamp_var <-model_mat %>%
+    group_by(treatment) %>%
+  summarise_all(funs(sd))
+
+fullsamp_std <-data.frame(t(fullsamp_var))
+fullsamp_std$pooled <- sqrt(((fullsamp_std[,1])^2 + (fullsamp_std[,2])^2)/2)
+
+fullsamp<-data.frame(t(fullsamp_means),fullsamp_std$pooled)
+
+#calculate the standardized bias of the observed sample
+colnames(fullsamp)<-c("sip_mean","oral_mean","sd")
+fullsamp$bias <-(as.numeric(as.character(fullsamp$sip_mean))-as.numeric(as.character(fullsamp$oral_mean)))/as.numeric(as.character(fullsamp$sd))
+fullsamp$group <-rep("Observed",nrow(fullsamp))
+fullsamp$label <-rownames(fullsamp)
+
+
+######matched group
+#same calculations, now for the saved matched dataset
+model_mat <-model.matrix(~treatment +agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro+weights -1,matched_oral)
+
+model_mat <-data.frame(model_mat)
+#model_mat$treatment <-as.factor(model_mat$treatment)
+
+
+
+matched_means <-model_mat %>%
+  group_by(treatment) %>%
+  summarise_all(funs(weighted.mean(., weights)))
+
+matched_var <-model_mat %>%
+  group_by(treatment) %>%
+  summarise_all(funs(sqrt(sum(weights*(.-weighted.mean(., weights))^2/((n()-1)/n()*sum(weights))))))
+
+matched_std <-data.frame(t(matched_var))
+matched_std$pooled <- sqrt(((matched_std[,1])^2 + (matched_std[,2])^2)/2)
+
+matched<-data.frame(t(matched_means),matched_std$pooled)
+matched<-matched[1:33,]
+
+colnames(matched)<-c("sip_mean","oral_mean","sd")
+matched$bias <-(as.numeric(as.character(matched$sip_mean))-as.numeric(as.character(matched$oral_mean)))/as.numeric(as.character(matched$sd))
+matched$group <-rep("Matched",nrow(matched))
+matched$label <-rownames(matched)
+
+
+
+#####IPTW Group
+#same calcuation using the inverse probability weights
+model_mat <-model.matrix(~treatment +agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro+IPTW -1,oral60)
+
+model_mat <-data.frame(model_mat)
+#model_mat$treatment <-as.factor(model_mat$treatment)
+
+
+
+weighted_means <-model_mat %>%
+  group_by(treatment) %>%
+  summarise_all(funs(weighted.mean(., IPTW)))
+
+weighted_var <-model_mat %>%
+  group_by(treatment) %>%
+  summarise_all(funs(sqrt(sum(IPTW*(.-weighted.mean(., IPTW))^2/((n()-1)/n()*sum(IPTW))))))
+
+weighted_std <-data.frame(t(weighted_var))
+weighted_std$pooled <- sqrt(((weighted_std[,1])^2 + (weighted_std[,2])^2)/2)
+
+weighted<-data.frame(t(weighted_means),weighted_std$pooled)
+weighted<-weighted[1:33,]
+
+colnames(weighted)<-c("sip_mean","oral_mean","sd")
+weighted$bias <-(as.numeric(as.character(weighted$sip_mean))-as.numeric(as.character(weighted$oral_mean)))/as.numeric(as.character(weighted$sd))
+weighted$group <-rep("Logistic IPTW",nrow(weighted))
+weighted$label <-rownames(weighted)
+
+
+#####CBPS Group
+#same calculations using the covariate balance propensity score weights
+
+model_mat <-model.matrix(~treatment +agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro+cbps -1,oral60)
+
+model_mat <-data.frame(model_mat)
+#model_mat$treatment <-as.factor(model_mat$treatment)
+
+
+
+cbps_means <-model_mat %>%
+  group_by(treatment) %>%
+  summarise_all(funs(weighted.mean(., cbps)))
+
+cbps_var <-model_mat %>%
+  group_by(treatment) %>%
+  summarise_all(funs(sqrt(sum(cbps*(.-weighted.mean(., cbps))^2/((n()-1)/n()*sum(cbps))))))
+
+cbps_std <-data.frame(t(cbps_var))
+cbps_std$pooled <- sqrt(((cbps_std[,1])^2 + (cbps_std[,2])^2)/2)
+
+balanced<-data.frame(t(cbps_means),cbps_std$pooled)
+balanced<-balanced[1:33,]
+
+colnames(balanced)<-c("sip_mean","oral_mean","sd")
+balanced$bias <-(as.numeric(as.character(balanced$sip_mean))-
+                   as.numeric(as.character(balanced$oral_mean)))/as.numeric(as.character(balanced$sd))
+balanced$group <-rep("CBPS IPTW",nrow(balanced))
+balanced$label <-rownames(balanced)
+
+
+
+#construct plot data frame from all calculations
+plot_data <-rbind(fullsamp,matched,weighted,balanced)
+#plot_data$label <-rownames(plot_data)
+
+#change label names for presentation
+plot_data$label <-c("Sip","Age: <55","Age: 55-64","Age: 65-74","Age: >74","Race: Asian","Race: Black","Race: Hispanic", "Race: Unknown","Educaton: Some College","Education: Unknown","Income: 50-99K", "Income: >99k", "Income: Unknown","Region: East South Central","Region: Middle Atlantic", "Region: Mountain","Region: New England","Region: Pacific","Region: South Atlantic","Region: Unknown","Region: West North Central","Region: West South Central","Product: Other","Product: PPO","Metastatic: Yes","ASO: Yes","Diabetes: Yes","Hypertension: Yes","CHF: Yes","Osteoporosis: Yes","Arrhythmia: Yes","Provider: Urologist")
+#remove row where bias is infinite because there are no subjects in control group
+'%!in%' <- function(x,y)!('%in%'(x,y))
+plot_data <-plot_data %>%
+  filter(label %!in% c("Sip","Region: Unknown","treatment"))
+
+
+library(ggplot2)
+library(ggpubr)
+library(ggsci)
+#visual inspect covariate balance using ggplot
+fp <- ggplot(data =plot_data,aes(x=label, y=bias,color=group,shape=group)) +
+  scale_shape_manual(values=c(20,18,17,15))+ 
+    geom_hline(yintercept=-0.1, lty=3,size=0.7) + 
+  geom_hline(yintercept=0.1,lty=3,size=0.7) + #these lines indicate the thresholds for high differences
+
+  geom_point(size=5) + 
+  geom_hline(yintercept=0, lty=2) +  # add a dotted line at x=1 after flip
+  coord_flip() +  # flip coordinates (puts labels on y axis)
+  xlab("Variable") + ylab("Standardized Difference") + 
+  theme_minimal()+ theme(
+                           axis.ticks.y=element_blank(),
+                         panel.grid.minor=element_blank(),
+                         legend.title=element_blank(),
+                         text = element_text(size=16),
+                         axis.title.x =element_text(hjust = 0.2,size=16)) #additional aesthetic options
+
+ggpar(fp,palette="nejm")
+
+```
+
+##Outcome Analysis
+
+###Binary Outcome: Visit to the Emergency Room (ER) in 60 days
+
+We can now discuss our first measured outcome of interest. Let $Y_{i}=1$ if the patient had any ER visit within the first 60 days of starting treatment, and $Y_{i}=0$ if not. Thus, $\pi_{i}(1)$ is the probability an individual had an ER visit if they received Sipuleucel-T as first-line treatment, and  $\pi_{i}(0)$ if they received oral therapy. We are interested in the ratio of the odds a patient had an ER visit when treated with oral therapy to the odds a patient had an ER visit when treated with sipuleucel-T. We can model this odds ratio using a logistic regression model:
+
+
+$$
+log(\dfrac{\pi_{i}}{1-\pi_{i}}) =  \beta_{1}T_{i} 
+$$
+Where $e^{\beta_{1}}$ is the odds ratio and thus $\pi_i$ is the probability of having an ER visit for subject $i$. This model provides the odds ratio directly from the observed data prior to our using any of the bias reduction techniques or or adjustments.
+
+
+```{r ae_er60_unad, echo=TRUE}
+#model the unadjusted treatment effect
+mod_unad <-glm(er60~treatment,data=oral60,family=binomial(link=logit))
+#summarize model results
+summary(mod_unad)
+
+#hard to interpret results because they are still on natural log scale
+#here is a quick function to exponentiate  and report estimate and confidence interval
+exp_out <-function(model_object){
+  out<-matrix(nrow=1,ncol=3)
+    out[1,1] <-round(exp(summary(model_object)$coefficients[2,1]),2)   
+    out[1,2] <-round(exp(summary(model_object)$coefficients[2,1] - 1.96*summary(model_object)$coefficients[2,2]),2)
+    out[1,3] <-round(exp(summary(model_object)$coefficients[2,1] + 1.96*summary(model_object)$coefficients[2,2]),2)
+  colnames(out) <-c('OR','Lower','Upper')
+  rownames(out)<-names(model_object$coefficients[2])
+  print(out)
+}
+
+#now see odds ratio and confidence interval after expoentiation
+exp_out(mod_unad)
+```
+ After running this model, we get an estimate of 0.75 (0.46,1.23), also reported in Table 3. Next, we use the traditional covariate adjustment approach:
+
+$$
+log(\dfrac{\pi_{i}}{1-\pi_{i}}) =  \beta_{1}T_{i} +\beta_{2}X_{2i} + \beta_{3}X_{3i} + ...+ \beta_{k}X_{ki} 
+$$
+where the additional $X$'s are the variables thought to confound assignment of treatment, such as age, race, comorbidities, and the other variables as listed previously in Table 1. The interpretation of the odds ratio $e^{\beta_1}$ changes slightly as we are now modeling a conditional odds ratio versus the marginal odds ratio above. The difference here it is the population we are estimating. The marginal odds ratio is for the entire population, whereas this odds ratio is conditional on values of $X_i$ 
+```{r ae_er60_adj, echo=TRUE}
+
+
+#now modeling provenge adjusting for all covariates
+#not a good choice when there are many covariates
+mod_adj <-glm(er60~treatment+agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=oral60,family=binomial(link=logit))
+
+exp_out(mod_adj)
+```
+
+Now we compare these results to our propensity methods. We can run the simple logistic regression model on our matched dataset, where we previously showed reduced bias. Notice the larger confidence interval, as we reduced the sample size in the matching process.
+
+```{r ae_er60_match, echo=TRUE}
+
+mod_match <-glm(er60~treatment,data=matched_oral,family=binomial(link='logit'),weights = weights)
+
+exp_out(mod_match)
+```
+
+```{r ae_er60_prop, echo=TRUE}
+library(mgcv)
+mod_prop <-gam(er60~treatment+s(pr_score,k=4,m=3),data=oral60,family=binomial(link='logit'))
+
+#same output function but for GAM model objects
+exp_out_gam <-function(gam_model){
+    out<-matrix(nrow=1,ncol=3)
+    out[1,1] <-round(exp(gam_model$coefficients[2]),2)   
+    out[1,2] <-round(exp(gam_model$coefficients[2] - 1.96*sqrt(gam_model$Ve[2,2])),2)
+    out[1,3] <-round(exp(gam_model$coefficients[2] + 1.96*sqrt(gam_model$Ve[2,2])),2)
+  colnames(out) <-c('Estimate','Lower','Upper')
+  rownames(out)<-names(gam_model$coefficients[2])
+  print(out)
+}
+
+exp_out_gam(mod_prop)
+```
+Finally, we can fit the outcome model on the full dataset, now weighting each observation by the IPTW weights and the CBPS weights calculated. 
+
+```{r ae_er60_iptw, echo=TRUE}
+
+library(survey)
+
+design.ps <- svydesign(ids=~1, weights=~IPTW, data=oral60)
+
+mod_iptw<-svyglm(er60~treatment,design=design.ps,family=binomial(link='logit'))
+
+exp_out(mod_iptw)
+
+design.cbps <- svydesign(ids=~1, weights=~cbps, data=oral60)
+
+mod_iptw<-svyglm(er60~treatment,design=design.cbps,family=binomial(link='logit'))
+
+exp_out(mod_iptw)
+```
+We then repeated the above analysis, letting docetaxel be the treatment group compared to sipuleucel-T. Using the propensity adjustment method, the odds ratio estimate for whether a patient will have a trip to the ER if they receive an oral therapy first-line versus sipuleucel-T is 0.82, (CI 0.48-1.38). When patients who received docetaxel first-line were compared to patients who received sipuleucel-T, the OR was 1.65, (CI 0.97-2.81). None of these ORs were statistically significant. 
+
+
+
+```{r doc_er60, eval=FALSE, include=FALSE}
+doc<-firstline_single[firstline_single$pdoc<99,]
+doc$treatment<-doc$pdoc
+
+doc60<-doc %>%
+  filter(enrolltime >=60)
+
+#will produce warning, but warning is not of concern 
+matched <- matchit((1-treatment)~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data =doc60, method = "nearest",caliper=.2,ratio=4)
+
+matched_sum<-summary(matched)
+matched_sum$nn
+
+
+matched_doc <- match.data(matched)
+
+modfullgroup <-glm(er60~treatment,data=doc60,family=binomial(link=logit))
+summary(modfullgroup)
+exp_out(modfullgroup)
+
+modfullgroup2 <-glm(er60~treatment+agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=doc60,family=binomial(link=logit))
+
+exp_out(modfullgroup2)
+
+matchedmodreg <-glm(er60~treatment,data=matched_doc,family=binomial(link='logit'),weights =weights)
+exp_out(matchedmodreg)
+
+propdoc <-glm(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=doc60,family=binomial(link='logit'))
+
+doc60$pr_score <-predict(propdoc, type = "response")
+
+summary(doc60$pr_score)
+
+doc60$pr_score_trim <-ifelse(doc60$pr_score<.01,.01,doc60$pr_score)
+doc60$pr_score_trim <-ifelse(doc60$pr_score>.99,.99,doc60$pr_score_trim)
+
+doc60$IPTW <-doc60$treatment/doc60$pr_score_trim + (1-doc60$treatment)/(1-doc60$pr_score_trim)
+
+#prep <-gam(er60~treatment+s(pr_score,k=4,m=3),data=doc60,family=binomial(link='logit'))
+#summary(prep)
+#exp(prep$coefficients[2] +qnorm(c(0.5,0.025,0.975)) *(sqrt(prep$Vc[2,2]) ))
+
+
+
+cbps <-CBPS(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia,data=doc60,standardize=FALSE,method="exact",ATT=1)
+doc60$CBPS <-cbps$weights
+
+design.ps <- svydesign(ids=~1, weights=~IPTW, data=doc60)
+
+mod_iptw<-svyglm(er60~treatment,design=design.ps,family=binomial(link='logit'))
+
+exp_out(mod_iptw)
+
+design.cbps <- svydesign(ids=~1, weights=~CBPS, data=doc60)
+
+mod_iptw<-svyglm(er60~treatment,design=design.cbps,family=binomial(link='logit'))
+
+exp_out(mod_iptw)
+
+```
+
+### Count Outcome: Number of Emergency Room (ER) visits in 180 days
+Next, we model our count outcome, the number of ER visits, where $Y_{i} =0,1,2, ..\infty$. We are interested in the ratio in the expected number of ER visits between sip-T and a&e patients. We can model that difference as:
+$$
+log(\mu_{i}) = \beta _{0} + \beta_{1}T_{i} 
+$$
+where $\mu_{i}$ is the expected number of ER visits in 180 days from start of treatment. Thus,  $e^{\beta_{1}}$ can tell us the factor the expected counts differ as a ratio of means. All models we fit in the binary outcome can be fit in a similar fashion to this Poisson outcome. One key change here is the Poisson model assumes the same parameter for the expected count (mean) and the variance; we can see from Table 1 that this assumption may not hold. Thus, we accounted for this relationship by changing the dispersion parameter in our models, allowing the variance to be a factor larger than the mean. Table 3 shows the results of each method for the count outcome.
+
+```{r ae_er180, echo=TRUE}
+#filter data to those with at least 180 days of enrollment
+oral180<-oral %>%
+  filter(enrolltime >=180)
+
+#use quasipoisson function to account for overdispersion
+mod_unad <-glm(ercount180~treatment,data=oral180,family=quasipoisson(link="log"))
+
+exp_out(mod_unad)
+```
+ The models show that we can expect the same number of ER visits for patients who receive an oral therapy first-line vs. those who receive sipuleucel-T. However, we can expect 1.78 (CI 1.02, 3.10) times as many ER visits for a patient who receives docetaxel first-line, compared to patients who received sipuleucel-T (using the propensity adjustment estimate). Here we can see that an unadjusted model may be overestimating this factor, as the estimates decrease in the adjusted model and propensity methods. 
+```{r ae_er180_no, echo=TRUE}
+modfullgroup2 <-glm(ercount180~treatment+agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+hypertension+CHF+osteoporosis+arrythmia+uro,data=oral180,family=quasipoisson(link="log"))
+
+exp_out(modfullgroup2)
+
+matched <- matchit((1-treatment)~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data =oral180, method = "nearest",caliper=.2,ratio=4)
+
+matched_sum<-summary(matched)
+matched_sum$nn
+
+
+matched_ae <- match.data(matched)
+
+matchedmodreg <-glm(ercount180~treatment,data=matched_ae,family=quasipoisson(link="log"),weights = weights)
+
+exp_out(matchedmodreg)
+
+propae <-glm(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=oral180,family=binomial(link='logit'))
+
+oral180$pr_score <-predict(propae, type = "response")
+
+summary(oral180$pr_score)
+
+oral180$pr_score_trim <-ifelse(oral180$pr_score<.01,.01,oral180$pr_score)
+oral180$pr_score_trim <-ifelse(oral180$pr_score>.99,.99,oral180$pr_score_trim)
+
+oral180$IPTW <-oral180$treatment/oral180$pr_score_trim + (1-oral180$treatment)/(1-oral180$pr_score_trim)
+
+#prep <-gam(ercount180~treatment+s(pr_score,k=4,m=3),data=ae180,family=quasipoisson(link="log"))
+#summary(prep)
+#exp(prep$coefficients[2] +qnorm(c(0.5,0.025,0.975)) *(sqrt(prep$Vp[2,2]) ))
+
+
+
+
+cbps <-CBPS(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=oral180,standardize=FALSE,method="exact")
+oral180$CBPS <-cbps$weights
+
+design.ps <- svydesign(ids=~1, weights=~IPTW, data=oral180)
+
+mod_iptw<-svyglm(ercount180~treatment,design=design.ps,family=poisson)
+
+exp_out(mod_iptw)
+
+design.cbps <- svydesign(ids=~1, weights=~CBPS, data=oral180)
+
+mod_iptw<-svyglm(ercount180~treatment,design=design.cbps,family=poisson)
+
+exp_out(mod_iptw)
+
+
+```
+
+```{r doc_er180, eval=FALSE, include=FALSE}
+
+doc180<-doc %>%
+  filter(enrolltime >=180)
+
+modfullgroup <-glm(ercount180~treatment,data=doc180,family=quasipoisson(link="log"))
+summary(modfullgroup)
+for(i in 2:length(modfullgroup$coefficients)){
+  out <-data.frame(t(exp(summary(modfullgroup)$coefficients[i,1] +     qnorm(c(0.5,0.025,0.975)) * summary(modfullgroup)$coefficients[i,2])))
+  colnames(out) <-c('OR','Lower','Upper')
+  rownames(out)<-names(modfullgroup$coefficients[i])
+  print(out)
+}
+
+modfullgroup2 <-glm(ercount180~treatment+agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+hypertension+CHF+osteoporosis+arrythmia+uro,data=doc180,family=quasipoisson(link="log"))
+
+for(i in 2:length(modfullgroup$coefficients)){
+  out <-data.frame(t(exp(summary(modfullgroup2)$coefficients[i,1] +     qnorm(c(0.5,0.025,0.975)) * summary(modfullgroup2)$coefficients[i,2])))
+  colnames(out) <-c('OR','Lower','Upper')
+  rownames(out)<-names(modfullgroup2$coefficients[i])
+  print(out)
+}
+
+matched <- matchit((1-treatment)~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data =doc180, method = "nearest",caliper=.2,ratio=4)
+
+matched_sum<-summary(matched)
+matched_sum$nn
+
+
+matched_doc <- match.data(matched)
+
+matchedmodreg <-glm(ercount180~treatment,data=matched_doc,family=quasipoisson(link="log"))
+summary(matchedmodreg)
+for(i in 2:length(matchedmodreg$coefficients)){
+  out <-data.frame(t(exp(summary(matchedmodreg)$coefficients[i,1] +     qnorm(c(0.5,0.025,0.975)) * summary(matchedmodreg)$coefficients[i,2])))
+  colnames(out) <-c('OR','Lower','Upper')
+  rownames(out)<-names(matchedmodreg$coefficients[i])
+  print(out)
+}
+
+propdoc <-glm(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=doc180,family=binomial(link='logit'))
+
+doc180$pr_score <-predict(propdoc, type = "response")
+
+summary(doc180$pr_score)
+
+doc180$pr_score_trim <-ifelse(doc180$pr_score<.01,.01,doc180$pr_score)
+doc180$pr_score_trim <-ifelse(doc180$pr_score>.99,.99,doc180$pr_score_trim)
+
+doc180$IPTW <-doc180$treatment/doc180$pr_score_trim + (1-doc180$treatment)/(1-doc180$pr_score_trim)
+
+prep <-gam(ercount180~treatment+s(pr_score,k=4,m=3),data=doc180,family=quasipoisson(link="log"))
+summary(prep)
+exp(prep$coefficients[2] +qnorm(c(0.5,0.025,0.975)) *(sqrt(prep$Vp[2,2]) ))
+
+
+dociptw<-glm(ercount180~treatment,data=doc180,family=quasipoisson(link="log"),weights=as.vector(IPTW))
+summary(dociptw)
+for(i in 2:length(dociptw$coefficients)){
+  out <-data.frame(t(exp(summary(dociptw)$coefficients[i,1] +     qnorm(c(0.5,0.025,0.975)) * summary(dociptw)$coefficients[i,2])))
+  colnames(out) <-c('OR','Lower','Upper')
+  rownames(out)<-names(dociptw$coefficients[i])
+  print(out)
+}
+
+cbps <-CBPS(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia,data=doc180,standardize=FALSE,method="exact")
+doc180$CBPS <-cbps$weights
+
+doccbps <-glm(er60~treatment,data=doc180,family=quasipoisson(link="log"),weights=as.vector(CBPS))
+summary(doccbps)
+for(i in 2:length(doccbps$coefficients)){
+  out <-data.frame(t(exp(summary(doccbps)$coefficients[i,1] +     qnorm(c(0.5,0.025,0.975)) * summary(doccbps)$coefficients[i,2])))
+  colnames(out) <-c('OR','Lower','Upper')
+  rownames(out)<-names(doccbps$coefficients[i])
+  print(out)
+}
+```
+
+###Length of Stay Outcomes: Time on Treatment and Time Enrolled
+We will now discuss the time to events outcomes. The first time to event is time to treatment termination, or total time on treatment. Patients would be expected to have less total time on treatment if they had a highly resistant cancer that would not respond to any treatments (and thus treatments would not be continued if they were ineffective), or if they had severe toxicities to treatment that did not allow for continuation. The event is defined as the last claim related to treatment of any of the six focus drugs. Thus, time from start of first-line treatment to the last claim contributes as total time on treatment. The other event is insurance dropout, a censored time point which we are considering a surrogate outcome for death. This event occurs at the last claim of any type available, and thus the total time enrolled in the insurance plan is time from start of treatment to this last claim. For each treatment group, we are interested in the risk of stopping treatment and the risk of dropping out at any given time point. These risks, or hazards, can be estimated using a proportional hazards model:
+$$
+log(\dfrac{\lambda_{i}(t)}{\lambda_{0}(t)}) =  \beta_{1}T_{i} 
+$$
+where $\lambda_{0}(t)$ is the baseline hazard function for our control group (sip-T) and $\lambda_{i}(i)$ is the hazard for treatment group $T_{i}$. Thus, $e^{\beta_{1}}$ is a hazard ratio of the two treatment groups being compared at the same time. We can now apply each propensity method as before; however, when adjusting for the propensity score in the outcome model, it is suggested to use a penalized spline basis, a special modification for this kind of outcome model (Therneau 2015). We used the package *survival* (Therneau, 2000) to model these outcomes
+```{r time_ae, echo=TRUE}
+library(survival)
+#create a factor variable of the treatment
+oral$treatment_fac<-factor(oral$treatment,labels =c("Sip","AE"))
+
+mod_unad <-coxph(Surv(enrolltime) ~ treatment_fac, data = oral)
+
+out <-exp(mod_unad$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(mod_unad$var[1,1]) ))
+names(out) <-c("Estimate","Lower","Upper")
+round(out,2)
+```
+Here, the propensity adjusted estimate of 1.15 (CI 1.04,1.27) shows that patients who receive an oral therapy first-line were more likely to stop treatment at any given time than patients who received sipuleucel-T. In other words, patients who received an oral therapy first-line had a shorter total duration of time on all treatments than patients who received sipuleucel-T as their first-line therapy. Using the same method, patients who received docetexal as first-line had a HR of are 1.35 (CI 1.20,1.51) again, having a shorter duration of time on treatment than those patients who started with sipulueucel-T. In Table 3, we can see the estimates for the hazard ratios of dropping out of the insurance as well, noticing a similar pattern. 
+
+
+```{r time_ae_other, eval=FALSE, include=FALSE}
+
+modfullgroup2 <- coxph(Surv(enrolltime)~provfac +agecat+racecat+educat+
+                      housecat+Division+
+                      Product+met+Aso+diabetes+
+                      hypertension+
+                      CHF+osteoporosis+arrythmia+
+                      uro,data=ae)
+summary(modfullgroup2)
+
+exp(modfullgroup2$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(modfullgroup2$var[1,1]) ))
+
+matched <- matchit((1-treatment)~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data =ae, method = "nearest",caliper=.2,ratio=4)
+
+matched_sum<-summary(matched)
+matched_sum$nn
+
+
+matched_ae <- match.data(matched)
+
+matchedmodreg <-coxph(Surv(enrolltime) ~ provfac, data = matched_ae)
+summary(matchedmodreg)
+
+exp(matchedmodreg$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(matchedmodreg$var[1,1]) ))
+
+propae <-glm(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=ae,family=binomial(link='logit'))
+
+ae$pr_score <-predict(propae, type = "response")
+
+summary(ae$pr_score)
+
+ae$pr_score_trim <-ifelse(ae$pr_score<.01,.01,ae$pr_score)
+ae$pr_score_trim <-ifelse(ae$pr_score>.99,.99,ae$pr_score_trim)
+
+ae$IPTW <-ae$treatment/ae$pr_score_trim + (1-ae$treatment)/(1-ae$pr_score_trim)
+
+prep <-coxph(Surv(enrolltime)~provfac+pspline(pr_score,df=2),data=ae)
+summary(prep)
+
+exp(prep$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(prep$var[1,1]) ))
+
+aeiptw<-coxph(Surv(enrolltime)~provfac,data=ae,weights = IPTW)
+
+summary(aeiptw)
+
+exp(aeiptw$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(aeiptw$var[1,1]) ))
+
+cbps <-CBPS(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=ae,standardize=FALSE,method="exact")
+ae$CBPS <-cbps$weights
+
+aecbps <-coxph(Surv(enrolltime)~provfac,data=ae,weights = CBPS)
+summary(aecbps)
+exp(aecbps$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(aecbps$var[1,1]) ))
+
+
+
+#time on 6 drugs
+modfullgroup <-coxph(Surv(enroll_drug) ~ provfac, data = ae)
+summary(modfullgroup)
+exp(modfullgroup$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(modfullgroup$var[1,1]) ))
+
+
+modfullgroup2 <- coxph(Surv(enroll_drug)~provfac +agecat+racecat+educat+
+                      housecat+Division+
+                      Product+met+Aso+diabetes+
+                      hypertension+
+                      CHF+osteoporosis+arrythmia+
+                      uro,data=ae)
+summary(modfullgroup2)
+
+exp(modfullgroup2$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(modfullgroup2$var[1,1]) ))
+
+matched <- matchit((1-treatment)~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data =ae, method = "nearest",caliper=.2,ratio=4)
+
+matched_sum<-summary(matched)
+matched_sum$nn
+
+
+matched_ae <- match.data(matched)
+
+matchedmodreg <-coxph(Surv(enroll_drug) ~ provfac, data = matched_ae)
+summary(matchedmodreg)
+
+exp(matchedmodreg$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(matchedmodreg$var[1,1]) ))
+
+propae <-glm(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=ae,family=binomial(link='logit'))
+
+ae$pr_score <-predict(propae, type = "response")
+
+summary(ae$pr_score)
+
+ae$pr_score_trim <-ifelse(ae$pr_score<.01,.01,ae$pr_score)
+ae$pr_score_trim <-ifelse(ae$pr_score>.99,.99,ae$pr_score_trim)
+
+ae$IPTW <-ae$treatment/ae$pr_score_trim + (1-ae$treatment)/(1-ae$pr_score_trim)
+
+prep <-coxph(Surv(enroll_drug)~provfac+pspline(pr_score,df=2),data=ae)
+summary(prep)
+
+exp(prep$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(prep$var[1,1]) ))
+
+aeiptw<-coxph(Surv(enroll_drug)~provfac,data=ae,weights = IPTW)
+
+summary(aeiptw)
+
+exp(aeiptw$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(aeiptw$var[1,1]) ))
+
+cbps <-CBPS(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=ae,standardize=FALSE,method="exact")
+ae$CBPS <-cbps$weights
+
+aecbps <-coxph(Surv(enroll_drug)~provfac,data=ae,weights = CBPS)
+summary(aecbps)
+exp(aecbps$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(aecbps$var[1,1]) ))
+```
+
+
+```{r time_doc, eval=FALSE, include=FALSE}
+doc$provfac<-factor(doc$treatment,labels =c("Sip","Doc"))
+
+modfullgroup <-coxph(Surv(enrolltime) ~ provfac, data = doc)
+summary(modfullgroup)
+exp(modfullgroup$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(modfullgroup$var[1,1]) ))
+
+
+modfullgroup2 <- coxph(Surv(enrolltime)~provfac +agecat+racecat+educat+
+                      housecat+Division+
+                      Product+met+Aso+diabetes+
+                      hypertension+
+                      CHF+osteoporosis+arrythmia+
+                      uro,data=doc)
+summary(modfullgroup2)
+
+exp(modfullgroup2$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(modfullgroup2$var[1,1]) ))
+
+matched <- matchit((1-treatment)~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data =doc, method = "nearest",caliper=.2,ratio=4)
+
+matched_sum<-summary(matched)
+matched_sum$nn
+
+
+matched_doc <- match.data(matched)
+
+matchedmodreg <-coxph(Surv(enrolltime) ~ provfac, data = matched_doc)
+summary(matchedmodreg)
+
+exp(matchedmodreg$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(matchedmodreg$var[1,1]) ))
+
+propdoc <-glm(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=doc,family=binomial(link='logit'))
+
+doc$pr_score <-predict(propdoc, type = "response")
+
+summary(doc$pr_score)
+
+doc$pr_score_trim <-ifelse(doc$pr_score<.01,.01,doc$pr_score)
+doc$pr_score_trim <-ifelse(doc$pr_score>.99,.99,doc$pr_score_trim)
+
+doc$IPTW <-doc$treatment/doc$pr_score_trim + (1-doc$treatment)/(1-doc$pr_score_trim)
+
+prep <-coxph(Surv(enrolltime)~provfac+pspline(pr_score,df=2),data=doc)
+summary(prep)
+
+exp(prep$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(prep$var[1,1]) ))
+
+dociptw<-coxph(Surv(enrolltime)~provfac,data=doc,weights = IPTW)
+
+summary(dociptw)
+
+exp(dociptw$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(dociptw$var[1,1]) ))
+
+cbps <-CBPS(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia,data=doc,standardize=FALSE,method="exact")
+doc$CBPS <-cbps$weights
+
+doccbps<-coxph(Surv(enrolltime)~provfac,data=doc,weights = CBPS)
+
+summary(doccbps)
+
+exp(doccbps$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(doccbps$var[1,1]) ))
+
+
+#time on 6 drugs
+modfullgroup <-coxph(Surv(enroll_drug) ~ provfac, data = doc)
+summary(modfullgroup)
+exp(modfullgroup$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(modfullgroup$var[1,1]) ))
+
+
+modfullgroup2 <- coxph(Surv(enroll_drug)~provfac +agecat+racecat+educat+
+                      housecat+Division+
+                      Product+met+Aso+diabetes+
+                      hypertension+
+                      CHF+osteoporosis+arrythmia+
+                      uro,data=doc)
+summary(modfullgroup2)
+
+exp(modfullgroup2$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(modfullgroup2$var[1,1]) ))
+
+matched <- matchit((1-treatment)~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data =doc, method = "nearest",caliper=.2,ratio=4)
+
+matched_sum<-summary(matched)
+matched_sum$nn
+
+
+matched_doc <- match.data(matched)
+
+matchedmodreg <-coxph(Surv(enroll_drug) ~ provfac, data = matched_doc)
+summary(matchedmodreg)
+
+exp(matchedmodreg$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(matchedmodreg$var[1,1]) ))
+
+propdoc <-glm(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=doc,family=binomial(link='logit'))
+
+doc$pr_score <-predict(propdoc, type = "response")
+
+summary(doc$pr_score)
+
+doc$pr_score_trim <-ifelse(doc$pr_score<.01,.01,doc$pr_score)
+doc$pr_score_trim <-ifelse(doc$pr_score>.99,.99,doc$pr_score_trim)
+
+doc$IPTW <-doc$treatment/doc$pr_score_trim + (1-doc$treatment)/(1-doc$pr_score_trim)
+
+prep <-coxph(Surv(enroll_drug)~provfac+pspline(pr_score,df=2),data=doc)
+summary(prep)
+
+exp(prep$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(prep$var[1,1]) ))
+
+dociptw<-coxph(Surv(enroll_drug)~provfac,data=doc,weights = IPTW)
+
+summary(dociptw)
+
+exp(dociptw$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(dociptw$var[1,1]) ))
+
+cbps <-CBPS(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia,data=doc,standardize=FALSE,method="exact")
+doc$CBPS <-cbps$weights
+
+doccbps<-coxph(Surv(enroll_drug)~provfac,data=doc,weights = CBPS)
+
+summary(doccbps)
+
+exp(doccbps$coefficients[1] +qnorm(c(0.5,0.025,0.975)) *(sqrt(doccbps$var[1,1]) ))
+```
+
+
+
+
+```{r opioid_doc, eval=FALSE, include=FALSE}
+
+doc<-firstline_opioid[firstline_opioid$pdoc<=1,]
+
+doc$provfac<-factor(doc$pdoc,labels =c("Sip","Doc"))
+doc$Patid <-as.factor(doc$Patid)
+doc$t <-as.integer(doc$t)
+
+doc <-doc[doc$t<=6,]
+
+modfullgroup <-bam(monthtotal~provfac + s(t,by=provfac,k=3) +
+             s(Patid, bs="re",m=1),
+            data=doc)
+summary(modfullgroup)
+
+p <- plot_diff(modfullgroup, view="t", 
+                 comp=list(provfac=c("Doc", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="Doc-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+        print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+
+
+modfullgroup2 <-bam(monthtotal~provfac +agecat+racecat+educat+
+              housecat+Division+
+              Product+met+Aso+diabetes+
+              hypertension+
+              CHF+osteoporosis+arrythmia+
+              uro + s(t,by=provfac,k=3) +
+             s(Patid, bs="re",m=1),
+            data=doc)
+summary(modfullgroup2)
+
+
+p <- plot_diff(modfullgroup2, view="t", 
+                 comp=list(provfac=c("Doc", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="Doc-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+        print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+  
+  doc_matching <-doc %>%
+    group_by(Patid) %>%
+    filter(row_number()==1)
+  
+  doc_matching <-data.frame(doc_matching)
+  
+matched <- matchit(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+hypertension+CHF+osteoporosis+arrythmia+uro,data =doc_matching, method ="nearest",caliper=.2,ratio=4)
+
+matched_sum<-summary(matched)
+matched_sum$nn
+
+
+
+matched_doc <- match.data(matched)
+
+matched_ids <-unique(matched_doc$Patid)
+
+m_doc <- doc %>%
+  filter(Patid %in% matched_ids)
+  
+matchedmodreg <-bam(monthtotal~provfac + s(t,by=provfac,k=4) 
+            +s(t,k=4) + s(Patid, bs="re",m=1),
+            data=m_doc)
+summary(matchedmodreg)
+
+p <- plot_diff(matchedmodreg, view="t", 
+                 comp=list(provfac=c("Doc", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="Doc-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+        print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+
+propdoc <-glm(provfac~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=doc_matching,family=binomial(link='logit'))
+
+doc_matching$pr_score <-predict(propdoc, type = "response")
+
+cbps <-CBPS(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=doc_matching,standardize=TRUE,method="exact")
+doc_matching$CBPS <-cbps$weights
+
+doc_matching$pr_score_trim <-ifelse(doc_matching$pr_score<.01,.01,doc_matching$pr_score)
+doc_matching$pr_score_trim <-ifelse(doc_matching$pr_score>.99,.99,doc_matching$pr_score_trim)
+
+doc_matching$IPTW <-doc_matching$treatment/doc_matching$pr_score_trim + (1-doc_matching$treatment)/(1-doc_matching$pr_score_trim)
+
+doc_matching$st_weight <-doc_matching$IPTW / mean(doc_matching$IPTW)
+
+doc_matching <- doc_matching[,c(3,29:33)]
+
+doc <-left_join(doc,doc_matching,by="Patid")
+
+prep <-bam(monthtotal~provfac + s(t,by=provfac,k=3) + s(pr_score,k=4) +
+             s(Patid, bs="re",m=1),
+            data=doc)
+summary(prep)
+
+p <- plot_diff(prep, view="t", 
+                 comp=list(provfac=c("Doc", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="Doc-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+        print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+
+dociptw <-bam(monthtotal~provfac + s(t,by=provfac,k=3) + 
+             s(Patid, bs="re",m=1),
+            data=doc, weights = st_weight)
+
+summary(dociptw)
+
+
+p <- plot_diff(dociptw, view="t", 
+                 comp=list(provfac=c("Doc", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="Doc-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+        print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+        
+doccbps <-bam(monthtotal~provfac + s(t,by=provfac,k=3) + 
+             s(Patid, bs="re",m=1),
+            data=doc, weights = CBPS)
+
+summary(dociptw)
+
+
+p <- plot_diff(doccbps, view="t", 
+                 comp=list(provfac=c("Doc", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="Doc-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+        print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+
+```
+
+
+
+
+
+
+
+
+
+
+### Time Varying Outcome: Opioid Usage Post Treatment 
+
+Lastly, in those patients who had an opioid prescribed at any time, we evaluated the time varying outcome of opioids prescribed in MME per month for patients who had baseline opioid use before starting one of the focus treatments for their prostate cancer. Many patients with metastatic prostate cancer have pain from their disease that require opiates for pain control. Therefore, the level of MMEs may be a surrogate measure for disease burden, and disease response to treatment. Each patient included in this subset had baseline opioid prescriptions (30 days prior to start of treatment) as well as 6 months of opioids prescribed after initiation of treatment. Figure 2 shows the mean of each timepoint across the three treatment groups with a smooth showing the overall trend. 
+
+```{r opioid_plot, echo=TRUE}
+plot_data <-firstline_opioid %>%
+  group_by(t,Brand) %>%
+  summarise(mean = mean(monthtotal), std=sqrt(var(monthtotal)), n = n(),
+            median = median(monthtotal), q1=quantile(monthtotal,.25),
+            q3=quantile(monthtotal,.75)) %>%
+  filter(t<=6)
+
+plot_data$Treatment<-as.numeric(plot_data$Brand)
+plot_data$Treatment<-factor(plot_data$Treatment,levels=c(1,2,3),labels = c("Immunotherapy","Chemotherapy","Oral Therapy"))
+plot_data$provfac <-factor(as.numeric(plot_data$Brand),levels=c(1,2,3),labels=c("Sip","Doc","AE"))
+plot_data$t <- plot_data$t*30
+
+plot_all <-firstline_opioid %>%
+  dplyr::select(t,Brand,monthtotal) %>%
+  filter(t<=6)
+
+plot_all$Treatment<-as.numeric(plot_all$Brand)
+plot_all$Treatment<-factor(plot_all$Treatment,levels=c(1,2,3),labels = c("Immunotherapy","Chemotherapy","Oral Therapy"))
+plot_all$provfac <-factor(as.numeric(plot_all$Brand),levels=c(1,2,3),labels=c("Sip","Doc","AE"))
+
+plot_all$mean <-plot_all$monthtotal
+
+#plot_data <-plot_data[plot_data$Brand!="DOC",]
+
+p <-ggplot(plot_data,aes(x=t,y=mean,group=Treatment,color=Treatment,fill=Treatment,linetype=Treatment,weight=n,shape=Treatment))   + 
+geom_smooth(method = lm, formula = y ~ splines::bs(x, 3), se = FALSE,size=2)+ geom_point(size=4.5) + labs(color='Treatment',x='Days Since Treatment Start',y='Mean Opioids Prescribed (MME)') + 
+  scale_x_continuous(breaks = seq(0, 180, by = 30)) +theme_minimal()+ theme(#plot.title = element_text(hjust = 0.9,size=16),
+                           axis.ticks.y=element_blank(),
+                         panel.grid.minor=element_blank(),
+                         legend.title=element_blank(),
+                         text = element_text(size=16))
+
+ggpar(p,palette="nejm")
+```
+
+
+We wish to model the trend and to test if there is any difference in mean opioid prescribing at any time point between treatment groups. We can model the quantity of opioids prescribed in MME $Y_{ij}$ at the $j^{th}$ 30 day period for each individual $i$ as:
+
+$$
+Y_{ij} = \beta_{0} + b_{0i} + \beta_{1}T_{i} + S(t_{ij}) +S(t_{ij})T_{i} +\epsilon_{ij}
+$$
+
+where $j=1,..,n_{i}$, $n_{i} \in \{1,2,3,4,5,6,7\}$, $b_{0} \sim N(0,\tau^{2})$ and $\epsilon_{i} \sim MVN_{n_{i}}(0,\sigma^{2}I_{n_{i}})$. $S(t_{ij})$ is specified as a penalized regression spline with 3 degrees of freedom, allowing more flexible smooths for modeling the prescribing trend over time. We set the smooth in an interaction term to allow for a different smooth trends for the the sipuluecel-T and oral therapy treatment groups. Thus, the main parameter of interest tells us the difference in the mean opioid prescribing over time between the two groups. We can fit use each of the methods in this outcome, adding covariates and smooths directly in the model, and fitting the model on a matched dataset. An important note when using IPTW and CBPS is that we are only weighting on the initial treatment, so at other time points the weights may bias the results. Also, we truncated the time to six months because many patients may switch cancer therapies as time progresses and six months is an average amount of time that a patient may be on any of these given focus treatments. Any inferences using the full time period will be heavily biased by changing therapy. There are more advanced methods to handle switching treatments, such as marginal structure models (Cole, 2003). Table 3 shows the estimated difference in mean opioid usage between groups at selected time points. For example, the difference in MME prescribed to an average individual in the sipuleucel-T group vs. the oral therapy grou at treatment start is -83 (CI -391,224) in the unadjusted model. In other words, among patients prescribed opioids, the average individual in the sipuleucel-T group treatment is predicted to have 83 more MME prescribed than the average individual in the oral therapy group at treatment start, however, this difference is not significantly significant. This estimate changes 90 days post treatment start to -130 (CI -380, 121) demonstrating how the estimate varies across time.
+
+
+```{r opioid_ae, echo=TRUE, eval=FALSE}
+
+
+
+
+ae<-firstline_opioid[firstline_opioid$pae<=1,]
+
+
+
+ae$treatment <-ae$pae
+ae <-ae %>%
+  dplyr::select(Patid,monthtotal,t,treatment,pae,agecat,racecat,educat,
+              housecat,Division,
+              Product,met,Aso,diabetes,
+              hypertension,
+              CHF,osteoporosis,arrythmia,
+              uro)
+ae$monthtotal <-ifelse(is.na(ae$monthtotal),0,ae$monthtotal)
+
+ae$provfac<-factor(ae$pae,labels =c("Sip","AE"))
+ae$Patid <-as.factor(ae$Patid)
+ae$t <-as.integer(ae$t)
+
+ae <-ae[ae$t<=6,]
+
+modfullgroup <-bam(monthtotal~provfac  +s(t,by=provfac,k=3)+
+                     s(Patid, bs="re",m=1),data=ae)
+summary(modfullgroup)
+
+gam.check(modfullgroup)
+  p <- plot_diff(modfullgroup, view="t", 
+                 comp=list(provfac=c("AE", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 xlim=c(0,6),
+                 main="AE-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE) #plot=FALSE
+  
+g<-plot_smooth(modfullgroup, view = "t",cond=list(provfac=c("Sip")),rm.ranef = TRUE, main="TEST",rug =FALSE)
+  
+  print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+  
+
+
+
+modfullgroup2 <-bam(monthtotal~provfac +agecat+racecat+educat+
+              housecat+Division+
+              Product+met+Aso+diabetes+
+              hypertension+
+              CHF+osteoporosis+arrythmia+
+              uro  + s(t,by=provfac,k=3) +
+            + s(Patid, bs="re",m=1),
+            data=ae)
+summary(modfullgroup2)
+
+  
+    p <- plot_diff(modfullgroup2, view="t", 
+                 comp=list(provfac=c("AE", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="AE-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+  print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)]))  
+  
+  ae_matching <-ae %>%
+    group_by(Patid) %>%
+    filter(row_number()==1)
+  
+  ae_matching <-data.frame(ae_matching)
+  
+matched <- matchit(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+hypertension+CHF+osteoporosis+arrythmia+uro,data =ae_matching, method ="nearest",caliper=.2,ratio=4)
+
+matched_sum<-summary(matched)
+matched_sum$nn
+
+
+
+matched_ae <- match.data(matched)
+
+matched_ids <-unique(matched_ae$Patid)
+
+m_ae <- ae %>%
+  filter(Patid %in% matched_ids)
+  
+matchedmodreg <-bam(monthtotal~provfac + s(t,by=provfac,k=3) +
+             s(Patid, bs="re",m=1),
+            data=m_ae)
+summary(matchedmodreg)
+
+    p <- plot_diff(matchedmodreg, view="t", 
+                 comp=list(provfac=c("AE", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="AE-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+        print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+
+
+propae <-glm(provfac~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=ae_matching,family=binomial(link='logit'))
+
+ae_matching$pr_score <-predict(propae, type = "response")
+
+summary(ae_matching$pr_score)
+
+ae_matching$pr_score_trim <-ifelse(ae_matching$pr_score<.01,.01,ae_matching$pr_score)
+ae_matching$pr_score_trim <-ifelse(ae_matching$pr_score>.99,.99,ae_matching$pr_score_trim)
+
+ae_matching$IPTW <-ae_matching$treatment/ae_matching$pr_score_trim + (1-ae_matching$treatment)/(1-ae_matching$pr_score_trim)
+
+cbps <-CBPS(treatment~agecat+racecat+educat+housecat+Division+Product+met+Aso+diabetes+
+  hypertension+CHF+osteoporosis+arrythmia+uro,data=ae_matching,standardize=TRUE,method="exact")
+ae_matching$CBPS <-cbps$weights
+
+#normalize weights for bam
+ae_matching$st_weight <-ae_matching$IPTW / mean(ae_matching$IPTW)
+
+ae_matching<-data.frame(ae_matching)
+
+ae_matching <- ae_matching %>%
+            dplyr::select(Patid,pr_score,pr_score_trim,IPTW,CBPS,st_weight)
+
+ae <-left_join(ae,ae_matching,by="Patid")
+
+prep <-bam(monthtotal~provfac + s(t,by=provfac,k=3) + s(pr_score,k=4) +
+            s(Patid, bs="re",m=1),
+            data=ae)
+summary(prep)
+
+p <- plot_diff(prep, view="t", 
+                 comp=list(provfac=c("AE", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="AE-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+   print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+
+aeiptw <-bam(monthtotal~provfac + s(t,by=provfac,k=3) +  
+             s(Patid, bs="re",m=1),
+            data=ae, weights = st_weight)
+
+summary(aeiptw)
+
+
+p <- plot_diff(aeiptw, view="t", 
+                 comp=list(provfac=c("AE", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="AE-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+        print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+   
+   
+ aecbps <-bam(monthtotal~provfac + s(t,by=provfac,k=3) +  
+             s(Patid, bs="re",m=1),
+            data=ae, weights = CBPS)
+
+summary(aecbps)
+
+
+p <- plot_diff(aecbps, view="t", 
+                 comp=list(provfac=c("AE", "Sip")),
+                 cond=list(Condition=1),
+                 ylim=c(-1000,2000),
+                 main="AE-Sip",
+                 col=rainbow(6)[6], 
+                 rm.ranef=TRUE)
+
+        print(paste(p$est[c(1,51,99)],p$est[c(1,51,99)] - p$CI[c(1,51,99)],p$est[c(1,51,99)] + p$CI[c(1,51,99)])) 
+        
+
+
+```
+
+
+
+
+##Discussion
+We have outlined propensity methods for estimating the causal effects of a treatment on and the outcomes of interest. We showed that these methods can make the comparison groups more balanced on a large number of characteristics, and thus provide more reliable estimates of possible causal relationships. To illustrate these methods, we used treatment outcomes for different therapies used to treat patients with advanced prostate cancer. Results above showed that patients who received chemotherapy (docetaxel) first-line may have more frequent trips to the emergency room in the first six months compared to patients who receive sipuleucel-T as first-line therapy. Results also demonstrated that patients who received sipuleucel-T first-line may have longer total time on all treatments (first-line and subsequent treatments) than patients whose first-line therapy is an oral therapy or docetaxel. Finally, among patients who already have a baseline opioid requirement for pain control when they initiate treatment for advanced prostate cancer, we saw higher average baseline requirements among those patients who were started on docetaxel than those patients who were started on sipuleucel-T. However, patients in the docetaxel group appeared to have better pain control after starting treatment than those patients started on sipuleucel-T. 
+
+A significant limitation to making any clinical conclusions about prostate cancer outcomes with the findings in this paper is that prostate cancer is a heterogeneous cancer, as opposed to some other clinical conditions, with a wide variation in prognosis and expected responses to therapy, even in the metastatic setting, depending on a patient’s extent of disease. Thus, a major unmeasured confounder when studying prostate cancer in claims data is the extent of disease at initiation of treatment. Claims can identify if a patient is metastatic but cannot identify the extent of their metastases. 
+
+This limitation has significant implications if one were to clinically interpret the data. For example, when comparing opioid requirements and differences of opioid use among treatment groups, we cannot ascertain whether a patient is using opioids for their cancer or for another reason. It’s possible that patients in the sipuleucel-T group who have a baseline opioid requirement may use opioids for a condition unrelated to their advanced prostate cancer, as opposed to patients in the docetaxel or oral therapy group. In addition, providing more reliable estimates of the causal relationships. 
+
+There are additional challenges and drawbacks to our approach. The number of ER visits and whether a patient visited the ER during the first 60 days of initiating a treatment does not tell us the reason a patient visited the ER. Patients may be presenting to the ER due to their disease, toxicities of the treatment, or another reason unrelated to their disease or treatment. Identifying the fact that patients treated with docetaxel first-line visit the ER more frequently may be signaling the fact that patients treated with docetaxel first-line have more severe prostate cancer with more associated problems that require ER evaluation. Some of these limitations are inherent to working in claims data. If we were able to control for disease severity at initiation of treatment, then an increased odds of visiting the ER would more reliably indicate a higher toxicity of therapy, or less control of disease from the treatment. Furthermore, since we cannot control for disease severity, we are not able to confidently say that patients who received sipuleucel-T are on treatment longer because of sipuleucel-T – we are only able to conclude that they remain on treatment longer. It’s possible that patients started on sipuleucel-T have less aggressive disease at the start of therapy. However, interestingly, we did find that the increased time that patients in the sipuleucel-T group remained enrolled (potential surrogate for survival) compared to patients in the other two groups was longer than the differences we saw when comparing the amount of time on treatment. While impossible to conclude from this data, these data would suggest it’s possible that patients who receive sipuleucel-T first-line may derive a longer-term benefit that is demonstrated even after all treatment is discontinued. 
+
+There are challenges and drawbacks to our approach. Propensity methods rely on correct specification of the propensity model. Here, we used a theoretical framework, pre-emptively specifying which variables are most associated with assignment of treatment such as age, economic status, and pre- existing comorbid condition. These variables were considered as potential confounders to both treatment and outcome assessment. Wading through many variables in a large database to identify such variables can be quite cumbersome. There are more data driven approaches that find the selection techniques to find variables most associated with treatment assignment and the outcome (Schneeweiss, 2011). 
+
+Further, we used a logistic regression model to calculate the propensity scores. While this model allows for natural interpretation of the variables included (which indeed my still be of interest), it may be poor at predicting propensity in comparison to other machine learning models (Lee, 2010.) Even in large datasets, it is also possible that true confounders are not observed and thus not included in the model. Furthermore, the uncertainty around the propensity estimates in not accounted for in the outcome models, and thus may influence proper inference and confidence with the estimates (Stuart, 2013.) 
+
+Additionally, we effectively have three treatments of interest, yet we stratified the data to have two separate, independent analyses, of two treatment groups. This provides easier calculation and matching from propensity, however, segmenting may mis-specify the treatment allocation mechanisms, as in practice all options are available. Generalized propensity scores can be calculated for multiple categories with the cost of considerably greater complexity (Hirano, 2004, Austin, 2018.) 
+
+
+##Conclusion
+
+In summary, the methods shown are tools for estimating causal effects from observed data in claims and EHR databases. It is important to note that even these tools cannot perfectly answer causal questions, even on the most extensive data, as the potential outcomes are never observed for each individual. Thus, careful consideration is required by the researchers as to what variables are confounding treatment and outcome, and what method and its assumptions best fit the study. We hope this paper will aid researchers in using these methods to strengthen the study analysis, while noting the limitations.
+
+
+##References
+Ali, M. S., Groenwold, R. H. H., Belitser, S. V., Pestman, W. R., Hoes, A. W., Roes, K. C. B., … Klungel, O. H. (2015). Reporting of covariate selection and balance assessment in propensity score analysis is suboptimal: a systematic review. Journal of Clinical Epidemiology, 68(2), 122–131. https://doi.org/10.1016/J.JCLINEPI.2014.08.011
+Austin, P. C. (2008). A critical appraisal of propensity-score matching in the medical literature between 1996 and 2003. Statistics in Medicine, 27(12), 2037–2049. https://doi.org/10.1002/sim.3150
+Austin, P. C. (2008). Assessing balance in measured baseline covariates when using many-to-one matching on the propensity-score. https://doi.org/10.1002/pds.1674
+Austin, P. C. (2009). The Relative Ability of Different Propensity Score Methods to Balance Measured Covariates Between Treated and Untreated Subjects in Observational Studies. Medical Decision Making, 29(6), 661–677. https://doi.org/10.1177/0272989X09341755
+Austin, P. C. (2011). Optimal caliper widths for propensity‐score matching when estimating differences in means and differences in proportions in observational studies. Pharmaceutical Statistics, 10(2), 150–161. https://doi.org/10.1002/PST.433
+Austin, P. C. (2014). The use of propensity score methods with survival or time-to-event outcomes: reporting measures of effect similar to those used in randomized experiments. Statistics in Medicine, 33(7), 1242–1258. https://doi.org/10.1002/sim.5984
+Austin, P. C., Grootendorst, P., & Anderson, G. M. (2007). A comparison of the ability of different propensity score models to balance measured variables between treated and untreated subjects: a Monte Carlo study. Statistics in Medicine, 26(4), 734–753. https://doi.org/10.1002/sim.2580
+Austin, P. C., & Stuart, E. A. (2015). Moving towards best practice when using inverse probability of treatment weighting (IPTW) using the propensity score to estimate causal treatment effects in observational studies. Statistics in Medicine, 34(28), 3661–3679. https://doi.org/10.1002/sim.6607
+Austin, P. C. (2011). An Introduction to Propensity Score Methods for Reducing the Effects of Confounding in Observational Studies. Multivariate Behavioral Research, 46(3), 399–424. https://doi.org/10.1080/00273171.2011.568786
+Austin, P. C. (2018). Assessing the performance of the generalized propensity score for estimating the effect of quantitative or continuous exposures on binary outcomes. Statistics in Medicine, 37(11), 1874–1894. https://doi.org/10.1002/sim.7615
+Birnbaum, H. G., Cremieux, P. Y., Greenberg, P. E., LeLorier, J., Ostrander, J., & Venditti, L. (1999). Using Healthcare Claims Data for Outcomes Research and Pharmacoeconomic Analyses. PharmacoEconomics, 16(1), 1–8. https://doi.org/10.2165/00019053-199916010-00001
+Brookhart, M. A., Schneeweiss, S., Rothman, K. J., Glynn, R. J., Avorn, J., & Stürmer, T. (2006). Variable Selection for Propensity Score Models. American Journal of Epidemiology, 163(12), 1149–1156. https://doi.org/10.1093/aje/kwj149
+Cole, S. R., & Hernán, M. A. (2008). Constructing Inverse Probability Weights for Marginal Structural Models. American Journal of Epidemiology, 168(6), 656–664. https://doi.org/10.1093/aje/kwn164
+D’ASCENZO, F., CAVALLERO, E., BIONDI-ZOCCAI, G., MORETTI, C., OMEDÈ, P., BOLLATI, M., … SHEIBAN, I. (2012). Use and Misuse of Multivariable Approaches in Interventional Cardiology Studies on Drug-Eluting Stents: A Systematic Review. Journal of Interventional Cardiology, 25(6), 611–621. https://doi.org/10.1111/j.1540-8183.2012.00753.x
+Deb, S., Austin, P. C., Tu, J. V., Ko, D. T., Mazer, C. D., Kiss, A., & Fremes, S. E. (2016). A Review of Propensity-Score Methods and Their Use in Cardiovascular Research. Canadian Journal of Cardiology, 32(2), 259–265. https://doi.org/10.1016/J.CJCA.2015.05.015
+Elixhauser A,, C. S. D. R. H. R. M. C. (1998). Comorbidity Measures for Use with Administrative Data. Medical Care, 36(1), 8–27
+Elixhauser A.. (2014) Clinical Classifications Software (CCS) U.S. Agency for Healthcare Research and Quality
+Fralick, M., Kesselheim, A. S., Avorn, J., & Schneeweiss, S. (2018). Use of Health Care Databases to Support Supplemental Indications of Approved Medications. JAMA Internal Medicine, 178(1), 55–63. https://doi.org/10.1001/jamainternmed.2017.3919
+Hadley, J., Yabroff, K. R., Barrett, M. J., Penson, D. F., Saigal, C. S., & Potosky, A. L. (2010). Comparative effectiveness of prostate cancer treatments: evaluating statistical adjustments for confounding in observational data. Journal of the National Cancer Institute, 102(23), 1780–1793. https://doi.org/10.1093/jnci/djq393
+Hauben, M., Madigan, D., Gerrits, C. M., Walsh, L., & Van Puijenbroek, E. P. (2005). Expert Opinion on Drug Safety The role of data mining in pharmacovigilance The role of data mining in pharmacovigilance. https://doi.org/10.1517/14740338.4.5.929
+Hirano, K., & Imbens, G. W. (n.d.). The propensity score with continuous treatments. Retrieved from http://www.math.mcgill.ca/dstephens/SISCR2017/Articles/HIrano-Imbens-2004.pdf
+Ho, D. E., Imai, K., King, G., & Stuart, E. A. (2007). Matching as Nonparametric Preprocessing for Reducing Model Dependence in Parametric Causal Inference. Political Analysis, 15(03), 199–236. https://doi.org/10.1093/pan/mpl013
+Horvitz, D. G., & Thompson, D. J. (1952). A Generalization of Sampling Without Replacement from a Finite Universe. Journal of the American Statistical Association, 47(260), 663–685. https://doi.org/10.1080/01621459.1952.10483446
+Imbens, G. W. (2004). Nonparametric Estimation of Average Treatment Effects under Exogeneity: A Review Author(s): Guido W. Imbens Source: The Review of Economics and Statistics NONPARAMETRIC ESTIMATION OF AVERAGE TREATMENT EFFECTS UNDER EXOGENEITY: A REVIEW* (Vol. 86). Retrieved from https://faculty.smu.edu/millimet/classes/eco7377/papers/imbens 04.pdf
+Joffe, M. M., Ten Have, T. R., Feldman, H. I., & Kimmel, S. E. (2004). Model Selection, Confounder Control, and Marginal Structural Models. The American Statistician, 58(4), 272–279. https://doi.org/10.1198/000313004X5824
+Johnson, M. L., Crown, W., Martin, B. C., Dormuth, C. R., & Siebert, U. (2009). Good Research Practices for Comparative Effectiveness Research: Analytic Methods to Improve Causal Inference from Nonrandomized Studies of Treatment Effects Using Secondary Data Sources: The ISPOR Good Research Practices for Retrospective Database Analysis Task Force Report—Part III. Value in Health, 12(8), 1062–1073. https://doi.org/10.1111/J.1524-4733.2009.00602.X
+Koo, K. C., Cho, J. S., Bang, W. J., Lee, S. H., Cho, S. Y., Kim, S. Il, … Chung, B. H. (2018). Cancer-Specific Mortality Among Korean Men with Localized or Locally Advanced Prostate Cancer Treated with Radical Prostatectomy Versus Radiotherapy: A Multi-Center Study Using Propensity Scoring and Competing Risk Regression Analyses. Cancer Research and Treatment : Official Journal of Korean Cancer Association, 50(1), 129–137. https://doi.org/10.4143/crt.2017.004
+Lee, B. K., Lessler, J., & Stuart, E. A. (2010). Improving propensity score weighting using machine learning. Statistics in Medicine, 29(3), 337–346. https://doi.org/10.1002/sim.3782
+Lee, B. K., Lessler, J., & Stuart, E. A. (2011). Weight Trimming and Propensity Score Weighting. PLoS ONE, 6(3), e18174. https://doi.org/10.1371/journal.pone.0018174
+Li, F., Morgan, K. L., & Zaslavsky, A. M. (2018). Balancing Covariates via Propensity Score Weighting. Journal of the American Statistical Association, 113(521), 390–400. https://doi.org/10.1080/01621459.2016.1260466
+Liu, W., Kuramoto, S. J., & Stuart, E. A. (2013). An introduction to sensitivity analysis for unobserved confounding in nonexperimental prevention research. Prevention Science : The Official Journal of the Society for Prevention Research, 14(6), 570–580. https://doi.org/10.1007/s11121-012-0339-5
+Lunceford, J. K., & Davidian, M. (n.d.). Stratification and Weighting Via the Propensity Score in Estimation of Causal Treatment Effects: A Comparative Study. Retrieved from https://www4.stat.ncsu.edu/~davidian/statinmed.pdf
+Maindonald, J. (2010). Smoothing Terms in GAM Models. Retrieved from http://wwwmaths.anu.edu.au/~johnm/r-book/xtras/lm-compute.pdf.
+National Center for Injury Prevention and Control. CDC compilation of benzodiazepines, muscle relaxants, stimulants, zolpidem, and opioid analgesics with oral morphine milligram equivalent conversion factors, 2018 version. Atlanta, GA: Centers for Disease Control and Prevention; 2018. Available at https://www.cdc.gov/drugoverdose/resources/data.html
+Rosenbaum, P. R. (1987a). Model-Based Direct Adjustment. Journal of the American Statistical Association, 82(398), 387–394. https://doi.org/10.1080/01621459.1987.10478441
+Rosenbaum, P. R., & Rubin, D. B. (1984). Reducing Bias in Observational Studies Using Subclassification on the Propensity Score. Journal of the American Statistical Association, 79(387), 516. https://doi.org/10.2307/2288398
+Rosenbaum, P. R. (1987b). The Role of a Second Control Group in an Observational Study. Statistical Science, 2(3), 292–306. https://doi.org/10.1214/ss/1177013232
+Rosenbaum, P. R., & Rubin, D. B. (1983). The Central Role of the Propensity Score in Observational Studies for Causal Effects. Biometrika (Vol. 70). Retrieved from http://www.stat.cmu.edu/~ryantibs/journalclub/rosenbaum_1983.pdf
+Rubin, D. B. (1974). ESTIMATING CAUSAL EFFECTS OF TREATMENTS IN RANDOMIZED AND NONRANDOMIZED STUDIES 1. Journal of Educational Psychology (Vol. 66). Retrieved from http://www.fsb.muohio.edu/lij14/420_paper_Rubin74.pdf
+Rubin, D. B., & Thomas, N. (1996). Matching Using Estimated Propensity Scores: Relating Theory to Practice. Biometrics, 52(1), 249. https://doi.org/10.2307/2533160
+Scharfstein, D. O., Rotnitzky, A., & Robins, J. M. (1999). Adjusting for Nonignorable Drop-Out Using Semiparametric Nonresponse Models. Retrieved from https://cdn1.sph.harvard.edu/wp-content/uploads/sites/343/2013/03/3R13de29.pdf
+Schneeweiss, S., Rassen, J. A., Glynn, R. J., Avorn, J., Mogun, H., & Brookhart, M. A. (2009). High-dimensional propensity score adjustment in studies of treatment effects using health care claims data. Epidemiology (Cambridge, Mass.), 20(4), 512–522. https://doi.org/10.1097/EDE.0b013e3181a663cc
+Stuart, E. A. (2010). Matching methods for causal inference: A review and a look forward. Statistical Science : A Review Journal of the Institute of Mathematical Statistics, 25(1), 1–21. https://doi.org/10.1214/09-STS313
+Stuart, E. A., DuGoff, E., Abrams, M., Salkever, D., & Steinwachs, D. (2013). Estimating causal effects in observational studies using Electronic Health Data: Challenges and (some) solutions. EGEMS (Washington, DC), 1(3), 1038. https://doi.org/10.13063/2327-9214.1038
+Tannen, R. L., Weiner, M. G., & Xie, D. (2009). Use of primary care electronic medical record database in drug efficacy research on cardiovascular outcomes: comparison of database and randomised controlled trial findings. BMJ (Clinical Research Ed.), 338, b81. https://doi.org/10.1136/bmj.b81
+Therneau, T. M., & Grambsch, P. M. (2000). Modeling survival data : extending the Cox model. Springer. Retrieved from https://cran.r-project.org/web/packages/survival/citation.html
+Weitzen, S., Lapane, K. L., Toledano, A. Y., Hume, A. L., & Mor, V. (2004). Principles for modeling propensity scores in medical research: a systematic literature review. Pharmacoepidemiology and Drug Safety, 13(12), 841–853. https://doi.org/10.1002/pds.969
+Wyss, R., Ellis, A. R., Brookhart, M. A., Girman, C. J., Jonsson Funk, M., LoCasale, R., & Stürmer, T. (2014). The Role of Prediction Modeling in Propensity Score Estimation: An Evaluation of Logistic Regression, bCART, and the Covariate-Balancing Propensity Score. American Journal of Epidemiology, 180(6), 645–655. https://doi.org/10.1093/aje/kwu181
+Wood, S.N. (2017) Generalized Additive Models: An Introduction with R (2nd edition). Chapman and Hall/CRC
+Yao, X. I., Wang, X., Speicher, P. J., Hwang, E. S., Cheng, P., Harpole, D. H., … Pang, H. H. (2017). Reporting and Guidelines in Propensity Score Analysis: A Systematic Review of Cancer and Cancer Surgical Studies. JNCI: Journal of the National Cancer Institute, 109(8). https://doi.org/10.1093/jnci/djw323
+
+
+
+
+
+
+
